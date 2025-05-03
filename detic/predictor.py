@@ -106,7 +106,7 @@ class VisualizationDemo(object):
             else:
                 break
 
-    def run_on_video(self, video):
+    def run_on_video(self, video, highlight_object=None):
         """
         Visualizes predictions on frames of the input video.
 
@@ -129,6 +129,14 @@ class VisualizationDemo(object):
             elif "instances" in predictions:
                 predictions = predictions["instances"].to(self.cpu_device)
                 vis_frame = video_visualizer.draw_instance_predictions(frame, predictions)
+                if highlight_object is not None:
+                    # Highlight the specified object
+                    for i in range(len(predictions)):
+                        if predictions.pred_classes[i] == highlight_object:
+                            vis_frame = video_visualizer.draw_instance_predictions(
+                                frame, predictions[i:i + 1]
+                            )
+                            break
             elif "sem_seg" in predictions:
                 vis_frame = video_visualizer.draw_sem_seg(
                     frame, predictions["sem_seg"].argmax(dim=0).to(self.cpu_device)
@@ -136,7 +144,7 @@ class VisualizationDemo(object):
 
             # Converts Matplotlib RGB format to OpenCV BGR format
             vis_frame = cv2.cvtColor(vis_frame.get_image(), cv2.COLOR_RGB2BGR)
-            return vis_frame
+            return vis_frame, predictions
 
         frame_gen = self._frame_from_video(video)
         if self.parallel:
