@@ -1,21 +1,25 @@
-#! ~/miniconda3/envs/detic3.9/bin python
+#! /home/asl1/miniconda3/envs/detic3.9/bin/python3.9
 import rospy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
 from torch import uint8 as torch_uint8
 import tkinter as tk
+import rospkg
 
 import os
 import sys
-os.chdir(os.path.dirname(__file__))
+from shape_detection.srv import StringSrv
 
-from detic.predictor import DefaultPredictor, AsyncPredictor, VisualizationDemo
+import pathlib as pl
+package_path = pl.Path(rospkg.RosPack().get_path('detic'))
+os.chdir(package_path)
+
+from detic.predictor import DefaultPredictor
 import detic.predictor as detic_predictor
 from detectron2.data import MetadataCatalog
 from detectron2.config import get_cfg
 from detic.config import add_detic_config
-import pathlib as pl
 
 
 sys.path.insert(0, 'third_party/CenterNet2/')
@@ -25,20 +29,24 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
-config_file = pl.Path(__file__).parent / "configs/Detic_LbaseI_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
-model_weights_file = pl.Path(__file__).parent / "models/Detic_LbaseI_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
+config_file = package_path / "configs/Detic_LbaseI_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
+model_weights_file = package_path / "models/Detic_LbaseI_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
 if not config_file.exists():
     raise FileNotFoundError(f"Config file not found: {config_file}")
 if not model_weights_file.exists():
     raise FileNotFoundError(f"Model weights not found: {model_weights_file}")
 
-camera_input_topic = "/dip/camera/color/image_rect_color"
-camera_output_topic = "/detic_output"
-camera_input_topic_depth = "/dip/camera/aligned_depth_to_color/image_raw"
+# camera_input_topic = "/dip/camera/color/image_rect_color"
+camera_input_topic = "color_image"
+camera_output_topic = "/dip/filtered_depth_image"
+camera_input_topic_depth = "depth_image"
+# camera_input_topic_depth = "/dip/camera/aligned_depth_to_color/image_raw"
+
 
 class ImageProcessor:
+    selected_object = None
     def __init__(self):
-        conf = 0.7
+        conf = 0.5
         self.bridge = CvBridge()
         self.cfg = get_cfg()
         add_centernet_config(self.cfg)
@@ -78,11 +86,19 @@ class ImageProcessor:
             class_names = [self.all_class_names[i] for i in classes] if classes is not None else None
 
             # Draw bounding boxes and labels on the image
+            flag = 0
             if boxes is not None and class_names is not None:
                 for box, class_name in zip(boxes, class_names):
                     x1, y1, x2, y2 = box.int().tolist()
-                    cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(cv_image, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    if self.selected_object is not None and class_name == self.selected_object and flag == 0:
+                        # Draw a red rectangle for the selected object
+                        flag = 1
+                        cv2.rectangle(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                        cv2.putText(cv_image, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                    else:
+                        # Draw a green rectangle for other objects
+                        cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(cv_image, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
             # Display the image with bounding boxes
             cv2.imshow("Detic Output", cv_image)
@@ -106,13 +122,15 @@ class PickFunction:
         self.bridge = CvBridge()
         
         self.sub = rospy.Subscriber(camera_input_topic_depth, Image, self.callback, queue_size=1)
-        # self.serviceClient = rospy.ServiceProxy("pick_and_place", StringSrv)
+        self.serviceClient = rospy.ServiceProxy("/pick_and_place", StringSrv)
 
     def pick_fn(self, object_name, mask, shape_name):
         self.object_name = object_name
         self.mask = mask
         self.shape_name = shape_name
-        # self.serviceClient.call(shape_name)
+        ImageProcessor.selected_object = object_name
+
+        self.serviceClient.call(self.shape_name)
     
     def callback(self, msg):
         try:
@@ -128,6 +146,7 @@ class PickFunction:
 
             # Convert the segmented depth image back to a ROS Image message
             segmented_msg = self.bridge.cv2_to_imgmsg(segmented_depth, encoding="16UC1")
+            segmented_msg.header = msg.header
 
             # Publish the segmented depth image
             self.pub.publish(segmented_msg)
@@ -142,6 +161,7 @@ class ChatBoxGUI:
         self.text_area.pack(expand=True, fill="both")
         self.entry = tk.Entry(self.window)
         self.entry.pack(fill="x")
+        self.entry.bind("<Return>", lambda event: self.send_message())  # Bind Enter key to send_message
         self.send_button = tk.Button(self.window, text="Send", command=self.send_message)
         self.send_button.pack()
 
@@ -151,12 +171,23 @@ class ChatBoxGUI:
         # Gemini LLM client and other dependencies
         self.client = client
         self.processor = processor
-        self.pick_obj = pick_obj
+        self.pick_obj: PickFunction = pick_obj
         self.config = config
+
+    def clear_text_area(self):
+        self.text_area.config(state="normal")
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.config(state="disabled")
+        self.text_area.see(tk.END)
+        self.message_history = []  # Clear message history
+        self.update_text_area()
+        self.entry.delete(0, tk.END)  # Clear the entry field
 
     def send_message(self):
         user_message = self.entry.get()
-        if user_message:
+        if user_message.lower() == "clear":
+            self.clear_text_area()
+        elif user_message:
             self.message_history.append(f"You: {user_message}")
             self.update_text_area()
             self.entry.delete(0, tk.END)
@@ -167,8 +198,8 @@ class ChatBoxGUI:
     def process_with_gemini(self, user_message):
         try:
             table_objects_str = ", ".join([x[0] for x in self.processor.identified_objects]) if self.processor.identified_objects else "None"
-            actual_prompt = "Table Objects: " + table_objects_str + ". " + user_message
-            self.message_history.append(f"Actual Prompt: {actual_prompt}")
+            actual_prompt = "Available Objects: " + table_objects_str + ".\nMy Response: " + user_message
+            self.message_history.append(f"Actual Prompt:\n{actual_prompt}")
             self.update_text_area()
 
             response = self.client.models.generate_content(
@@ -207,14 +238,16 @@ class ChatBoxGUI:
         self.text_area.delete(1.0, tk.END)
         for msg in self.message_history:
             self.text_area.insert(tk.END, f"{msg}\n")
+            self.text_area.insert(tk.END, "---------------------------------\n")
+        self.text_area.insert(tk.END, "---------------------------------\n")
         self.text_area.config(state="disabled")
         self.text_area.see(tk.END)  # Scroll to the end of the text area
 
 
 if __name__ == "__main__":
     rospy.init_node("detic_image_processor")
-    processor = ImageProcessor()
-    pick_obj = PickFunction()
+    processor:ImageProcessor = ImageProcessor()
+    pick_obj:PickFunction = PickFunction()
 
     # Load environment variables
     load_dotenv("gemini/.env")
@@ -239,9 +272,18 @@ if __name__ == "__main__":
             "required": ["object", "shape"],
         },
     }
+    reset_fn_declaration = {
+        "name": "reset",
+        "description": "Reset the robot arm to the initial/home position.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
     # Define client
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    tools = types.Tool(function_declarations=[pick_fn_declaration])
+    tools = types.Tool(function_declarations=[pick_fn_declaration, reset_fn_declaration])
     config = types.GenerateContentConfig(tools=[tools])
 
     # Conversation loop
