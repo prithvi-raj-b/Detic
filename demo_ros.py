@@ -96,9 +96,9 @@ class ImageProcessor:
                         cv2.rectangle(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
                         cv2.putText(cv_image, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
                     else:
-                        # Draw a green rectangle for other objects
-                        cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(cv_image, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        # Draw a gray rectangle for other objects
+                        cv2.rectangle(cv_image, (x1, y1), (x2, y2), (100, 100, 100), 2)
+                        cv2.putText(cv_image, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 2)
 
             # Display the image with bounding boxes
             cv2.imshow("Detic Output", cv_image)
@@ -170,6 +170,7 @@ class ChatBoxGUI:
 
         # Gemini LLM client and other dependencies
         self.client = client
+        self.chat = client.chats.create(model="gemini-2.5-flash", config=config)
         self.processor = processor
         self.pick_obj: PickFunction = pick_obj
         self.config = config
@@ -182,6 +183,7 @@ class ChatBoxGUI:
         self.message_history = []  # Clear message history
         self.update_text_area()
         self.entry.delete(0, tk.END)  # Clear the entry field
+        ImageProcessor.selected_object = None  # Reset selected object
 
     def send_message(self):
         user_message = self.entry.get()
@@ -202,11 +204,14 @@ class ChatBoxGUI:
             self.message_history.append(f"Actual Prompt:\n{actual_prompt}")
             self.update_text_area()
 
-            response = self.client.models.generate_content(
-                model="gemini-2.5-flash-preview-04-17",
-                contents=actual_prompt,
-                config=self.config,
-            )
+            # response = self.client.models.generate_content(
+            #     model="gemini-2.5-flash-preview-04-17",
+            #     contents=actual_prompt,
+            #     config=self.config,
+            # )
+
+            response = self.chat.send_message(actual_prompt)
+            # import pdb; pdb.set_trace()
             gemini_response = response.text
             self.message_history.append(f"Gemini: {gemini_response}")
             self.update_text_area()
@@ -223,14 +228,15 @@ class ChatBoxGUI:
                                 object_mask = mask
                                 break
                         if object_mask is not None:
-                            self.pick_obj.pick_fn(object_name, object_mask, shape_name)
                             self.message_history.append(f"Picked object: {object_name}, Shape: {shape_name}")
+                            self.update_text_area()
+                            self.pick_obj.pick_fn(object_name, object_mask, shape_name)
                         else:
                             self.message_history.append(f"Object {object_name} not found in identified objects.")
-                        self.update_text_area()
+                            self.update_text_area()
         except Exception as e:
-            error_message = f"Error during conversation: {e}"
-            self.message_history.append(error_message)
+            # error_message = f"Error during conversation: {e}"
+            # self.message_history.append(error_message)
             self.update_text_area()
 
     def update_text_area(self):
@@ -239,9 +245,10 @@ class ChatBoxGUI:
         for msg in self.message_history:
             self.text_area.insert(tk.END, f"{msg}\n")
             self.text_area.insert(tk.END, "---------------------------------\n")
-        self.text_area.insert(tk.END, "---------------------------------\n")
+        # self.text_area.insert(tk.END, "---------------------------------\n")
         self.text_area.config(state="disabled")
         self.text_area.see(tk.END)  # Scroll to the end of the text area
+        self.window.update_idletasks()  # Update the GUI to reflect changes
 
 
 if __name__ == "__main__":
